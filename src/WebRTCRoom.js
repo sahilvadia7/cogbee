@@ -1,37 +1,36 @@
 import { useEffect, useRef, useState } from "react";
 
 export default function WebRTCRoom() {
+
     const localVideoRef = useRef(null);
-    const videosRef = useRef(null);
+    const remoteContainerRef = useRef(null);
 
-    const [roomId, setRoomId] = useState(null);
+    const peers = useRef({});
     const [ws, setWs] = useState(null);
-    const [myId, setMyId] = useState(null);
     const [localStream, setLocalStream] = useState(null);
-    const peersRef = useRef({});
-
+    const [roomId, setRoomId] = useState("");
+    const [myId, setMyId] = useState("");
     const [createdLink, setCreatedLink] = useState("");
     const [shareLink, setShareLink] = useState("");
     const [transcript, setTranscript] = useState("");
 
-    let answerRecorder;
-    let recordedChunks = [];
+    const recorderRef = useRef(null);
+    const chunksRef = useRef([]);
 
-    // ------------------------------------------------------------
-    //  INIT – WebSocket + getUserMedia
-    // ------------------------------------------------------------
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // --------------------------------------------------------
+    // INIT: WebSocket + Camera
+    // --------------------------------------------------------
     useEffect(() => {
-        const urlParams = new URLSearchParams(window.location.search);
-        const initialRoom = urlParams.get("room");
-        setRoomId(initialRoom);
+        const params = new URLSearchParams(window.location.search);
+        const room = params.get("room");
 
-        const socket = new WebSocket("wss://delmar-drearier-arvilla.ngrok-free.dev/signal");
+        const socket = new WebSocket(
+            "wss://delmar-drearier-arvilla.ngrok-free.dev/signal"
+        );
+
         setWs(socket);
 
-        // Init Camera + Mic
-        navigator.mediaDevices
-            .getUserMedia({ video: true, audio: true })
+        navigator.mediaDevices.getUserMedia({ video: true, audio: true })
             .then((stream) => {
                 setLocalStream(stream);
                 if (localVideoRef.current) {
@@ -40,18 +39,22 @@ export default function WebRTCRoom() {
             });
 
         socket.onopen = () => {
-            if (initialRoom) joinRoom(initialRoom, socket);
+            if (room) joinRoom(room, socket);
         };
 
-        socket.onmessage = (msg) => handleSocket(JSON.parse(msg.data), socket);
+        socket.onmessage = (msg) => {
+            const data = JSON.parse(msg.data);
+            handleSignal(data);
+        };
 
         return () => socket.close();
     }, []);
 
-    // ------------------------------------------------------------
-    //  SOCKET HANDLER
-    // ------------------------------------------------------------
-    const handleSocket = async (data, socket) => {
+    // --------------------------------------------------------
+    // SIGNAL HANDLING
+    // --------------------------------------------------------
+    const handleSignal = async (data) => {
+
         if (data.type === "id") {
             setMyId(data.id);
             return;
@@ -59,164 +62,161 @@ export default function WebRTCRoom() {
 
         if (data.type === "peers") {
             for (let peerId of data.peers) {
-                await createPeer(peerId, true, socket);
+                await createPeer(peerId, true);
             }
             return;
         }
 
-        if (data.type === "offer") await handleOffer(data, socket);
-        if (data.type === "answer") await handleAnswer(data);
-        if (data.type === "candidate") await handleCandidate(data);
-        if (data.type === "leave") removeVideo(data.from);
+        if (data.type === "offer") return handleOffer(data);
+        if (data.type === "answer") return handleAnswer(data);
+        if (data.type === "candidate") return handleCandidate(data);
+        if (data.type === "leave") return removePeer(data.from);
     };
 
-    // ------------------------------------------------------------
-    //  ROOM MANAGEMENT
-    // ------------------------------------------------------------
+    // --------------------------------------------------------
+    // ROOM
+    // --------------------------------------------------------
     const createRoom = () => {
-        const id = Math.random().toString(36).substring(2, 10);
+        const id = Math.random().toString(36).substr(2, 8);
         const link = `${window.location.origin}${window.location.pathname}?room=${id}`;
         setCreatedLink(link);
     };
 
     const joinRoom = (id, socket = ws) => {
-        if (!socket) return;
-
         setRoomId(id);
 
-        socket.send(
-            JSON.stringify({
-                type: "join",
-                roomId: id,
-            })
-        );
+        socket.send(JSON.stringify({
+            type: "join",
+            roomId: id
+        }));
 
-        const link = `${window.location.origin}${window.location.pathname}?room=${id}`;
-        setShareLink(link);
+        setShareLink(`${window.location.origin}${window.location.pathname}?room=${id}`);
     };
 
-    // ------------------------------------------------------------
-    //  WEBRTC PEERS
-    // ------------------------------------------------------------
-    const createPeer = async (peerId, isCaller, socket = ws) => {
+    // --------------------------------------------------------
+    // WEBRTC PEER
+    // --------------------------------------------------------
+    const createPeer = async (peerId, isCaller) => {
+
         const pc = new RTCPeerConnection({
-            iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
         });
 
-        peersRef.current[peerId] = pc;
+        peers.current[peerId] = pc;
 
-        localStream?.getTracks().forEach((track) => {
-            pc.addTrack(track, localStream);
-        });
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
         pc.onicecandidate = (e) => {
-            if (e.candidate)
-                socket.send(
-                    JSON.stringify({
-                        type: "candidate",
-                        candidate: e.candidate,
-                        to: peerId,
-                        from: myId,
-                    })
-                );
-        };
-
-        pc.ontrack = (e) => addRemoteVideo(peerId, e.streams[0]);
-
-        if (isCaller) {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-
-            socket.send(
-                JSON.stringify({
-                    type: "offer",
-                    offer,
+            if (e.candidate) {
+                ws.send(JSON.stringify({
+                    type: "candidate",
+                    candidate: e.candidate,
                     to: peerId,
                     from: myId,
-                })
-            );
+                }));
+            }
+        };
+
+        pc.ontrack = (e) => {
+            addRemoteVideo(peerId, e.streams[0]);
+        };
+
+        if (isCaller) {
+            let offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            ws.send(JSON.stringify({
+                type: "offer",
+                offer,
+                to: peerId,
+                from: myId
+            }));
         }
     };
 
-    const handleOffer = async (data, socket = ws) => {
+    const handleOffer = async (data) => {
         const peerId = data.from;
 
-        if (!peersRef.current[peerId]) {
-            await createPeer(peerId, false, socket);
+        if (!peers.current[peerId]) {
+            await createPeer(peerId, false);
         }
 
-        const pc = peersRef.current[peerId];
+        const pc = peers.current[peerId];
         await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
 
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
 
-        socket.send(
-            JSON.stringify({
-                type: "answer",
-                answer,
-                to: peerId,
-                from: myId,
-            })
-        );
+        ws.send(JSON.stringify({
+            type: "answer",
+            answer,
+            to: peerId,
+            from: myId
+        }));
     };
 
     const handleAnswer = async (data) => {
-        const pc = peersRef.current[data.from];
-        if (pc)
-            await pc.setRemoteDescription(
-                new RTCSessionDescription(data.answer)
-            );
+        const pc = peers.current[data.from];
+        if (pc) {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        }
     };
 
     const handleCandidate = async (data) => {
-        const pc = peersRef.current[data.from];
+        const pc = peers.current[data.from];
         if (pc) await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
     };
 
+    // --------------------------------------------------------
+    // REMOTE VIDEO HANDLING
+    // --------------------------------------------------------
     const addRemoteVideo = (peerId, stream) => {
-        let el = document.getElementById("video-" + peerId);
-        if (!el) {
-            el = document.createElement("video");
-            el.id = "video-" + peerId;
-            el.autoplay = true;
-            el.playsInline = true;
-            videosRef.current.appendChild(el);
+        let video = document.getElementById("remote-" + peerId);
+
+        if (!video) {
+            video = document.createElement("video");
+            video.id = "remote-" + peerId;
+            video.autoplay = true;
+            video.playsInline = true;
+            video.style.width = "100%";
+            video.style.background = "#000";
+            remoteContainerRef.current.appendChild(video);
         }
-        el.srcObject = stream;
+
+        video.srcObject = stream;
     };
 
-    const removeVideo = (peerId) => {
-        const el = document.getElementById("video-" + peerId);
-        if (el) el.remove();
-        if (peersRef.current[peerId]) peersRef.current[peerId].close();
-        delete peersRef.current[peerId];
+    const removePeer = (peerId) => {
+        const video = document.getElementById("remote-" + peerId);
+        if (video) video.remove();
+
+        if (peers.current[peerId]) peers.current[peerId].close();
+        delete peers.current[peerId];
     };
 
-    // ------------------------------------------------------------
-    //  RECORDING
-    // ------------------------------------------------------------
+    // --------------------------------------------------------
+    // RECORDING
+    // --------------------------------------------------------
     const startRecording = () => {
-        recordedChunks = [];
-        answerRecorder = new MediaRecorder(localStream, {
-            mimeType: "video/webm",
+        chunksRef.current = [];
+
+        recorderRef.current = new MediaRecorder(localStream, {
+            mimeType: "video/webm"
         });
 
-        answerRecorder.ondataavailable = (e) => {
-            if (e.data.size > 0) recordedChunks.push(e.data);
+        recorderRef.current.ondataavailable = (e) => {
+            if (e.data.size > 0) chunksRef.current.push(e.data);
         };
 
-        answerRecorder.onstop = uploadAnswer;
+        recorderRef.current.onstop = uploadAnswer;
 
-        answerRecorder.start();
+        recorderRef.current.start();
     };
 
-    const stopRecording = () => {
-        answerRecorder.stop();
-    };
+    const stopRecording = () => recorderRef.current.stop();
 
     const uploadAnswer = () => {
-        const blob = new Blob(recordedChunks, { type: "video/webm" });
+        const blob = new Blob(chunksRef.current, { type: "video/webm" });
         const file = new File([blob], "answer.webm", { type: "video/webm" });
 
         const formData = new FormData();
@@ -230,64 +230,42 @@ export default function WebRTCRoom() {
             .then((text) => setTranscript(text));
     };
 
-    // ------------------------------------------------------------
-    //  JSX UI
-    // ------------------------------------------------------------
+    // --------------------------------------------------------
+    // UI
+    // --------------------------------------------------------
     return (
         <div style={{ padding: 20 }}>
-            <h2>Multi-User WebRTC Demo</h2>
+            <h2>Multi-User WebRTC Room</h2>
 
             <button onClick={createRoom}>Create Room</button>
-            {createdLink && (
-                <div style={{ background: "#eee", padding: 10, marginTop: 10 }}>
-                    Room Created! Share this link:
-                    <br />
-                    <b>{createdLink}</b>
-                </div>
-            )}
+            {createdLink && <div style={{ marginTop: 10 }}>Share: {createdLink}</div>}
 
             <div style={{ marginTop: 20 }}>
                 <input
                     placeholder="Enter Room ID"
                     onChange={(e) => setRoomId(e.target.value)}
                 />
-                <button onClick={() => joinRoom(roomId)}>Join Room</button>
+                <button onClick={() => joinRoom(roomId)}>Join</button>
             </div>
 
-            {shareLink && (
-                <div style={{ background: "#eee", padding: 10, marginTop: 10 }}>
-                    Invite others:
-                    <br />
-                    <b>{shareLink}</b>
-                </div>
-            )}
+            {shareLink && <div style={{ marginTop: 10 }}>Invite: {shareLink}</div>}
 
             <div style={{ marginTop: 20 }}>
                 <button onClick={startRecording}>Start Answer</button>
-                <button onClick={stopRecording} style={{ marginLeft: 10 }}>
-                    Stop Answer
-                </button>
+                <button onClick={stopRecording} style={{ marginLeft: 10 }}>Stop</button>
             </div>
 
-            <h3>Transcript</h3>
-            <pre
-                style={{
-                    background: "#fff",
-                    padding: 10,
-                    borderRadius: 6,
-                    minHeight: 40,
-                }}
-            >
-                {transcript}
-            </pre>
+            <h3>Transcript:</h3>
+            <pre>{transcript}</pre>
 
+            {/* VIDEOS */}
             <div
-                ref={videosRef}
+                ref={remoteContainerRef}
                 style={{
                     display: "grid",
-                    gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))",
-                    gap: 16,
                     marginTop: 20,
+                    gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))",
+                    gap: 10,
                 }}
             >
                 <video
