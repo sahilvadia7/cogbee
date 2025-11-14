@@ -26,7 +26,7 @@ export default function WebRTCRoom() {
         const initialRoom = urlParams.get("room");
         setRoomId(initialRoom);
 
-        const socket = new WebSocket("ws://localhost:8080/signal");
+        const socket = new WebSocket("wss://delmar-drearier-arvilla.ngrok-free.dev/signal");
         setWs(socket);
 
         // Init Camera + Mic
@@ -222,7 +222,7 @@ export default function WebRTCRoom() {
         const formData = new FormData();
         formData.append("file", file);
 
-        fetch("http://localhost:8080/api/interview/answer-video", {
+        fetch("https://delmar-drearier-arvilla.ngrok-free.dev/api/interview/answer-video", {
             method: "POST",
             body: formData,
         })
